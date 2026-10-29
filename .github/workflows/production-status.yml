@@ -1,0 +1,88 @@
+name: Production status
+
+# Shows the green production deployment on this public repo.
+# Real website files stay in the private GameSeek-Website repo.
+on:
+  repository_dispatch:
+    types: [website-deployed]
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: Website commit SHA already live on gameseekapp.com
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  deployments: write
+
+concurrency:
+  group: production-status
+  cancel-in-progress: false
+
+jobs:
+  production:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: production
+      url: https://gameseekapp.com
+    steps:
+      - name: Resolve the live commit to verify
+        id: rev
+        env:
+          DISPATCH_COMMIT: ${{ github.event.client_payload.commit }}
+          INPUT_COMMIT: ${{ inputs.commit }}
+        run: |
+          set -euo pipefail
+          commit="${DISPATCH_COMMIT:-}"
+          if [[ -z "$commit" ]]; then
+            commit="${INPUT_COMMIT:-}"
+          fi
+          if [[ -z "$commit" ]]; then
+            body=$(curl -fsSL --max-time 15 \
+              -H 'Cache-Control: no-cache' \
+              -H 'Accept: text/plain,*/*' \
+              -H 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' \
+              -H 'Sec-Fetch-Dest: empty' \
+              -H 'Sec-Fetch-Mode: cors' \
+              -H 'Sec-Fetch-Site: none' \
+              https://gameseekapp.com/deployment.txt)
+            commit=$(printf '%s\n' "$body" | sed -n 's/^commit=//p' | head -n1)
+          fi
+          test -n "$commit"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "Checking live marker for $commit"
+
+      - name: Verify gameseekapp.com matches that revision
+        env:
+          EXPECTED: ${{ steps.rev.outputs.commit }}
+        run: |
+          set -euo pipefail
+          ok=0
+          for i in $(seq 1 24); do
+            body=$(curl -fsSL --max-time 15 \
+              -H 'Cache-Control: no-cache' \
+              -H 'Accept: text/plain,*/*' \
+              -H 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' \
+              -H 'Sec-Fetch-Dest: empty' \
+              -H 'Sec-Fetch-Mode: cors' \
+              -H 'Sec-Fetch-Site: none' \
+              "https://gameseekapp.com/deployment.txt?ts=$EXPECTED-$i" || true)
+            echo "attempt $i: $body"
+            if printf '%s' "$body" | grep -q "commit=$EXPECTED"; then
+              ok=1
+              break
+            fi
+            sleep 5
+          done
+          test "$ok" -eq 1
+          code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 \
+            -H 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' \
+            -H 'Sec-Fetch-Dest: document' \
+            -H 'Sec-Fetch-Mode: navigate' \
+            -H 'Sec-Fetch-Site: none' \
+            -H 'Sec-Fetch-User: ?1' \
+            https://gameseekapp.com/)
+          test "$code" = "200"
+          echo "production environment verified for $EXPECTED"
